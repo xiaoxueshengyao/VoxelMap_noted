@@ -230,6 +230,7 @@ void RGBpointBodyToWorld(PointType const *const pi, PointType *const po) {
   int reflection_map = intensity * 10000;
 }
 
+// 多线激光的回调处理
 void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg) {
   mtx_buffer.lock();
   // cout<<"got feature"<<endl;
@@ -239,6 +240,7 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg) {
   }
   // ROS_INFO("get point cloud at time: %.6f", msg->header.stamp.toSec());
   PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
+  // 点云预处理，ros消息转换成pcl
   p_pre->process(msg, ptr);
   lidar_buffer.push_back(ptr);
   time_buffer.push_back(msg->header.stamp.toSec());
@@ -266,6 +268,7 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
   sig_buffer.notify_all();
 }
 
+// 把消息塞到buff里面
 void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in) {
   publish_count++;
   sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
@@ -289,6 +292,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in) {
   sig_buffer.notify_all();
 }
 
+// lidar和imu数据同步对齐
 bool sync_packages(MeasureGroup &meas) {
   if (!imu_en) {
     if (!lidar_buffer.empty()) {
@@ -602,6 +606,7 @@ int main(int argc, char **argv) {
   downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min,
                                  filter_size_surf_min);
 
+  // imu初始化外参等
   shared_ptr<ImuProcess> p_imu(new ImuProcess());
   p_imu->imu_en = imu_en;
   Eigen::Vector3d extT;
@@ -618,6 +623,7 @@ int main(int argc, char **argv) {
     std::cout << "no imu" << std::endl;
   }
 
+  // 设置尺度和bias偏置
   p_imu->set_gyr_cov_scale(V3D(gyr_cov_scale, gyr_cov_scale, gyr_cov_scale));
   p_imu->set_acc_cov_scale(V3D(acc_cov_scale, acc_cov_scale, acc_cov_scale));
   p_imu->set_gyr_bias_cov(V3D(0.00001, 0.00001, 0.00001));
@@ -665,6 +671,7 @@ int main(int argc, char **argv) {
       // std::cout << " init rot cov:" << std::endl
       //           << state.cov.block<3, 3>(0, 0) << std::endl;
       auto undistort_start = std::chrono::high_resolution_clock::now();
+      // feats_undistort为去畸变后的点云
       p_imu->Process(Measures, state, feats_undistort);
       auto undistort_end = std::chrono::high_resolution_clock::now();
       auto undistort_time =
@@ -674,6 +681,7 @@ int main(int argc, char **argv) {
           1000;
       if (calib_laser) {
         // calib the vertical angle for kitti dataset
+        // 垂直角度加了 0.15度
         for (size_t i = 0; i < feats_undistort->size(); i++) {
           PointType pi = feats_undistort->points[i];
           double range = sqrt(pi.x * pi.x + pi.y * pi.y + pi.z * pi.z);
@@ -703,10 +711,12 @@ int main(int argc, char **argv) {
       flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME
                            ? false
                            : true;
+      // 初始化地图
       if (flg_EKF_inited && !init_map) {
         pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(
             new pcl::PointCloud<pcl::PointXYZI>);
         Eigen::Quaterniond q(state.rot_end);
+        // 转到世界坐标
         transformLidar(state, p_imu, feats_undistort, world_lidar);
         std::vector<pointWithCov> pv_list;
         for (size_t i = 0; i < world_lidar->size(); i++) {
@@ -720,11 +730,13 @@ int main(int argc, char **argv) {
           if (point_this[2] == 0) {
             point_this[2] = 0.001;
           }
+          // 计算点对应的协方差，就是论文公式1
           M3D cov;
           calcBodyCov(point_this, ranging_cov, angle_cov, cov);
 
           point_this += Lidar_offset_to_IMU;
           M3D point_crossmat;
+          // 对应论文公式（3）
           point_crossmat << SKEW_SYM_MATRX(point_this);
           cov = state.rot_end * cov * state.rot_end.transpose() +
                 (-point_crossmat) * state.cov.block<3, 3>(0, 0) *
@@ -767,6 +779,7 @@ int main(int argc, char **argv) {
               .count() *
           1000;
 
+      // 对点云按时间先后排序
       sort(feats_down_body->points.begin(), feats_down_body->points.end(),
            time_list);
 
@@ -789,8 +802,10 @@ int main(int argc, char **argv) {
           point_this[2] = 0.001;
         }
         M3D cov;
+        // 按照公式(1)计算点的协方差
         calcBodyCov(point_this, ranging_cov, angle_cov, cov);
         M3D point_crossmat;
+        // 点的反对称阵，用于后续计算世界坐标系点的协方差
         point_crossmat << SKEW_SYM_MATRX(point_this);
         crossmat_list.push_back(point_crossmat);
         M3D rot_var = state.cov.block<3, 3>(0, 0);
@@ -819,6 +834,7 @@ int main(int argc, char **argv) {
         pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(
             new pcl::PointCloud<pcl::PointXYZI>);
         transformLidar(state, p_imu, feats_down_body, world_lidar);
+        // 点的协方差传递
         for (size_t i = 0; i < feats_down_body->size(); i++) {
           pointWithCov pv;
           pv.point << feats_down_body->points[i].x,
@@ -829,6 +845,7 @@ int main(int argc, char **argv) {
           M3D point_crossmat = crossmat_list[i];
           M3D rot_var = state.cov.block<3, 3>(0, 0);
           M3D t_var = state.cov.block<3, 3>(3, 3);
+          // 按照公式2计算world坐标下的协方差
           cov = state.rot_end * cov * state.rot_end.transpose() +
                 (-point_crossmat) * rot_var * (-point_crossmat.transpose()) +
                 t_var;
@@ -838,12 +855,14 @@ int main(int argc, char **argv) {
         }
         auto scan_match_time_start = std::chrono::high_resolution_clock::now();
         std::vector<V3D> non_match_list;
+        // 根据map构建残差，保存在ptpl_list
         BuildResidualListOMP(voxel_map, max_voxel_size, 3.0, max_layer, pv_list,
                              ptpl_list, non_match_list);
 
         auto scan_match_time_end = std::chrono::high_resolution_clock::now();
 
         effct_feat_num = 0;
+        // 对所有点残差相加
         for (int i = 0; i < ptpl_list.size(); i++) {
           PointType pi_body;
           PointType pi_world;
@@ -852,6 +871,7 @@ int main(int argc, char **argv) {
           pi_body.y = ptpl_list[i].point(1);
           pi_body.z = ptpl_list[i].point(2);
           pointBodyToWorld(&pi_body, &pi_world);
+          // 面的参数
           pl.x = ptpl_list[i].normal(0);
           pl.y = ptpl_list[i].normal(1);
           pl.z = ptpl_list[i].normal(2);
@@ -863,6 +883,7 @@ int main(int argc, char **argv) {
           corr_normvect->push_back(pl);
           total_residual += fabs(dis);
         }
+        // 残差均值
         res_mean_last = total_residual / effct_feat_num;
         scan_match_time +=
             std::chrono::duration_cast<std::chrono::duration<double>>(
@@ -888,6 +909,7 @@ int main(int argc, char **argv) {
         VectorXd R_inv(effct_feat_num);
         VectorXd meas_vec(effct_feat_num);
 
+        // 每个符合的点
         for (int i = 0; i < effct_feat_num; i++) {
           const PointType &laser_p = laserCloudOri->points[i];
           V3D point_this(laser_p.x, laser_p.y, laser_p.z);
@@ -905,6 +927,7 @@ int main(int argc, char **argv) {
           V3D norm_vec(norm_p.x, norm_p.y, norm_p.z);
           V3D point_world = state.rot_end * point_this + state.pos_end;
           // /*** get the normal vector of closest surface/corner ***/
+          // 这里的这些计算在前面都有计算过,这里基本都重新算了一遍
           Eigen::Matrix<double, 1, 6> J_nq;
           J_nq.block<1, 3>(0, 0) = point_world - ptpl_list[i].center;
           J_nq.block<1, 3>(0, 3) = -ptpl_list[i].normal;
@@ -921,6 +944,7 @@ int main(int argc, char **argv) {
               sqrt(sigma_l + norm_vec.transpose() * cov * norm_vec);
 
           /*** calculate the Measuremnt Jacobian matrix H ***/
+          // 观测的雅可比
           V3D A(point_crossmat * state.rot_end.transpose() * norm_vec);
           Hsub.row(i) << VEC_FROM_ARRAY(A), norm_p.x, norm_p.y, norm_p.z;
           Hsub_T_R_inv.col(i) << A[0] * R_inv(i), A[1] * R_inv(i),
@@ -947,6 +971,7 @@ int main(int argc, char **argv) {
           z_init.block<3, 1>(0, 0) = -state.pos_end;
 
           auto H_init_T = H_init.transpose();
+          // 卡尔曼增益
           auto &&K_init =
               state.cov * H_init_T *
               (H_init * state.cov * H_init_T + 0.0001 * MD(9, 9)::Identity())
@@ -956,6 +981,7 @@ int main(int argc, char **argv) {
           state.resetpose();
           EKF_stop_flg = true;
         } else {
+          // 卡尔曼增益和状态增量更新
           auto &&Hsub_T = Hsub.transpose();
           H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
           MD(DIM_STATE, DIM_STATE) &&K_1 =
@@ -996,6 +1022,7 @@ int main(int argc, char **argv) {
         }
 
         /*** Convergence Judgements and Covariance Update ***/
+        // 更新协方差
         if (!EKF_stop_flg &&
             (rematch_num >= 2 || (iterCount == NUM_MAX_ITERATIONS - 1))) {
           if (flg_EKF_inited) {
@@ -1025,6 +1052,7 @@ int main(int argc, char **argv) {
       }
 
       /*** add the  points to the voxel map ***/
+      // 更新voxelmap
       auto map_incremental_start = std::chrono::high_resolution_clock::now();
       pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(
           new pcl::PointCloud<pcl::PointXYZI>);
@@ -1044,6 +1072,7 @@ int main(int argc, char **argv) {
         pv_list.push_back(pv);
       }
       std::sort(pv_list.begin(), pv_list.end(), var_contrast);
+      // 更新地图,内部会判断是否是面点
       updateVoxelMap(pv_list, max_voxel_size, max_layer, layer_size,
                      max_points_size, max_points_size, min_eigen_value,
                      voxel_map);
