@@ -223,6 +223,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
   IMUpose.clear();
   // IMUpose.push_back(set_pose6d(0.0, Zero3d, Zero3d, state.vel_end,
   // state.pos_end, state.rot_end));
+  // imu位姿初始化
   IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last,
                                state_inout.vel_end, state_inout.pos_end,
                                state_inout.rot_end));
@@ -233,6 +234,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
   M3D R_imu(state_inout.rot_end);
   MD(DIM_STATE, DIM_STATE) F_x, cov_w;
 
+  // 前向传播
   double dt = 0;
   for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++) {
     auto &&head = *(it_imu);
@@ -241,6 +243,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
     if (tail->header.stamp.toSec() < pcl_beg_time)
       continue;
 
+    // 中指积分推位姿
     angvel_avr << 0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
         0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
         0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
@@ -254,6 +257,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
              << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
     // #endif
 
+    // 减去偏执bias得到实际值
     angvel_avr -= state_inout.bias_g;
     acc_avr = acc_avr * G_m_s2 / mean_acc.norm() - state_inout.bias_a;
 
@@ -265,12 +269,13 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
 
     /* covariance propagation */
     M3D acc_avr_skew;
-    M3D Exp_f = Exp(angvel_avr, dt);
+    M3D Exp_f = Exp(angvel_avr, dt);//罗德里格斯公式，把rpy转成matrix
     acc_avr_skew << SKEW_SYM_MATRX(acc_avr);
 
     F_x.setIdentity();
     cov_w.setZero();
 
+    // 论文公式，计算预测对状态的雅可比
     F_x.block<3, 3>(0, 0) = Exp(angvel_avr, -dt);
     F_x.block<3, 3>(0, 9) = -Eye3d * dt;
     // F_x.block<3,3>(3,0)  = R_imu * off_vel_skew * dt;
@@ -310,6 +315,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
   }
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
+  // 计算帧结束时的位置和姿态预测
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
   dt = note * (pcl_end_time - imu_end_time);
   state_inout.vel_end = vel_imu + note * acc_imu * dt;
@@ -321,6 +327,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
       state_inout.pos_end + state_inout.rot_end * Lid_offset_to_IMU;
 
   /*** undistort each lidar point (backward propagation) ***/
+  // 反向传播去畸变
   auto it_pcl = pcl_out.points.end() - 1;
   for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--) {
     auto head = it_kp - 1;
@@ -400,6 +407,7 @@ void ImuProcess::only_propag(const MeasureGroup &meas, StatesGroup &state_inout,
   state_inout.pos_end = state_inout.pos_end + state_inout.vel_end * dt;
 }
 
+// imu初始化+正向反向传播做点云去畸变
 void ImuProcess::Process(const MeasureGroup &meas, StatesGroup &stat,
                          PointCloudXYZI::Ptr &cur_pcl_un_) {
   double t1, t2, t3;
@@ -417,6 +425,7 @@ void ImuProcess::Process(const MeasureGroup &meas, StatesGroup &stat,
 
     last_imu_ = meas.imu.back();
 
+    // 大于200帧imu后认为imu初始化完成
     if (init_iter_num > MAX_INI_COUNT) {
       cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
       imu_need_init_ = false;
