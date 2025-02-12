@@ -129,7 +129,9 @@ public:
   }
 
   // check is plane , calc plane parameters including plane covariance
+  // 根据输入点集，确定平面
   void init_plane(const std::vector<pointWithCov> &points, Plane *plane) {
+    // 初始化平面参数
     plane->plane_cov = Eigen::Matrix<double, 6, 6>::Zero();
     plane->covariance = Eigen::Matrix3d::Zero();
     plane->center = Eigen::Vector3d::Zero();
@@ -137,21 +139,27 @@ public:
     plane->points_size = points.size();
     plane->radius = 0;
     for (auto pv : points) {
+      // 累计协方差和点坐标和
       plane->covariance += pv.point * pv.point.transpose();
       plane->center += pv.point;
     }
     plane->center = plane->center / plane->points_size;
+    // 计算协方差矩阵，covariance 除以点的数量，再减去中心点的外积
     plane->covariance = plane->covariance / plane->points_size -
                         plane->center * plane->center.transpose();
+    // 用eigen求协方差的特征值和特征向量                    
     Eigen::EigenSolver<Eigen::Matrix3d> es(plane->covariance);
     Eigen::Matrix3cd evecs = es.eigenvectors();
     Eigen::Vector3cd evals = es.eigenvalues();
     Eigen::Vector3d evalsReal;
     evalsReal = evals.real();
+    // 找到最小和最大特征值的索引
     Eigen::Matrix3f::Index evalsMin, evalsMax;
     evalsReal.rowwise().sum().minCoeff(&evalsMin);
     evalsReal.rowwise().sum().maxCoeff(&evalsMax);
+    // 中间特征值的索引？？
     int evalsMid = 3 - evalsMin - evalsMax;
+    // 提取最小、中间和最大特征值对应的特征向量
     Eigen::Vector3d evecMin = evecs.real().col(evalsMin);
     Eigen::Vector3d evecMid = evecs.real().col(evalsMid);
     Eigen::Vector3d evecMax = evecs.real().col(evalsMax);
@@ -159,9 +167,11 @@ public:
     Eigen::Matrix3d J_Q;
     J_Q << 1.0 / plane->points_size, 0, 0, 0, 1.0 / plane->points_size, 0, 0, 0,
         1.0 / plane->points_size;
+    // 如果最小特征值小于 planer_threshold_，则认为这些点构成一个平面
     if (evalsReal(evalsMin) < planer_threshold_) {
       std::vector<int> index(points.size());
       std::vector<Eigen::Matrix<double, 6, 6>> temp_matrix(points.size());
+      // 对应公式6-7
       for (int i = 0; i < points.size(); i++) {
         Eigen::Matrix<double, 6, 3> J;
         Eigen::Matrix3d F;
@@ -179,11 +189,12 @@ public:
             F.row(m) = F_m;
           }
         }
+        // 对应公式8
         J.block<3, 3>(0, 0) = evecs.real() * F;
         J.block<3, 3>(3, 0) = J_Q;
         plane->plane_cov += J * points[i].cov * J.transpose();
       }
-
+      // 设置平面属性
       plane->normal << evecs.real()(0, evalsMin), evecs.real()(1, evalsMin),
           evecs.real()(2, evalsMin);
       plane->y_normal << evecs.real()(0, evalsMid), evecs.real()(1, evalsMid),
@@ -194,10 +205,12 @@ public:
       plane->mid_eigen_value = evalsReal(evalsMid);
       plane->max_eigen_value = evalsReal(evalsMax);
       plane->radius = sqrt(evalsReal(evalsMax));
+      // Ax+By+Cz+D=0 中的d
       plane->d = -(plane->normal(0) * plane->center(0) +
                    plane->normal(1) * plane->center(1) +
                    plane->normal(2) * plane->center(2));
       plane->is_plane = true;
+      // 更新平面状态
       if (plane->last_update_points_size == 0) {
         plane->last_update_points_size = plane->points_size;
         plane->is_update = true;
@@ -206,6 +219,7 @@ public:
         plane->is_update = true;
       }
 
+      // 初始化平面id
       if (!plane->is_init) {
         plane->id = plane_id;
         plane_id++;
@@ -213,6 +227,7 @@ public:
       }
 
     } else {
+      // 如果不是平面
       if (!plane->is_init) {
         plane->id = plane_id;
         plane_id++;
@@ -225,6 +240,7 @@ public:
         plane->last_update_points_size = plane->points_size;
         plane->is_update = true;
       }
+      // 这里设为false，不是平面，计算与前面一致
       plane->is_plane = false;
       plane->normal << evecs.real()(0, evalsMin), evecs.real()(1, evalsMin),
           evecs.real()(2, evalsMin);
@@ -308,10 +324,13 @@ public:
   }
 
   void init_octo_tree() {
+    // 点足够多才进行初始化
     if (temp_points_.size() > max_plane_update_threshold_) {
       init_plane(temp_points_, plane_ptr_);
+      // 初始化如果是平面
       if (plane_ptr_->is_plane == true) {
         octo_state_ = 0;
+        // 点过多后就不再更新八叉树
         if (temp_points_.size() > max_cov_points_size_) {
           update_cov_enable_ = false;
         }
@@ -327,12 +346,15 @@ public:
       //      temp_points_.clear();
     }
   }
-
+  // 对八叉树进行裁剪操作，根据点的位置将其分配到不同的子节点中，
+  // 并对子节点进行相应的平面检测和状态更新
   void cut_octo_tree() {
+    // 当前层达到最大，不执行
     if (layer_ >= max_layer_) {
       octo_state_ = 0;
       return;
     }
+    // 确定每个点相对体素中心的相对位置
     for (size_t i = 0; i < temp_points_.size(); i++) {
       int xyz[3] = {0, 0, 0};
       if (temp_points_[i].point[0] > voxel_center_[0]) {
@@ -344,7 +366,9 @@ public:
       if (temp_points_[i].point[2] > voxel_center_[2]) {
         xyz[2] = 1;
       }
+      // 计算点对应索引
       int leafnum = 4 * xyz[0] + 2 * xyz[1] + xyz[2];
+      // 如果子节点不存在，则创建，层数+1
       if (leaves_[leafnum] == nullptr) {
         leaves_[leafnum] = new OctoTree(
             max_layer_, layer_ + 1, layer_point_size_, max_points_size_,
@@ -357,13 +381,16 @@ public:
             voxel_center_[2] + (2 * xyz[2] - 1) * quater_length_;
         leaves_[leafnum]->quater_length_ = quater_length_ / 2;
       }
+      // 如果存在则直接添加到对应的子节点
       leaves_[leafnum]->temp_points_.push_back(temp_points_[i]);
       leaves_[leafnum]->new_points_num_++;
     }
+    // 遍历子节点，进行平面检测和状态更新
     for (uint i = 0; i < 8; i++) {
       if (leaves_[i] != nullptr) {
         if (leaves_[i]->temp_points_.size() >
             leaves_[i]->max_plane_update_threshold_) {
+          // 对每个字节点初始化平面
           init_plane(leaves_[i]->temp_points_, leaves_[i]->plane_ptr_);
           if (leaves_[i]->plane_ptr_->is_plane) {
             leaves_[i]->octo_state_ = 0;
@@ -525,6 +552,18 @@ void mapJet(double v, double vmin, double vmax, uint8_t &r, uint8_t &g,
   b = (uint8_t)(255 * db);
 }
 
+/*
+ 根据输入点云构建voxelmap体素地图
+ param:
+ @input_points: 点云数据，包含协方差
+ @voxel_size: voxel大小 3.0
+ @max_layer: 八叉树最大层数， 默认 4
+ @layer_point_size: 每层点数 [5, 5, 5, 5, 5]
+ @max_points_size: 最大点数 1000
+ @max_points_size: 最大协方差点的点数 1000
+ @plan_threshold: 0.01  平面阈值
+ @feat_map：构建的特征地图，key为voxel的索引，value为对应的八叉树地图
+ */
 void buildVoxelMap(const std::vector<pointWithCov> &input_points,
                    const float voxel_size, const int max_layer,
                    const std::vector<int> &layer_point_size,
@@ -534,20 +573,26 @@ void buildVoxelMap(const std::vector<pointWithCov> &input_points,
   uint plsize = input_points.size();
   for (uint i = 0; i < plsize; i++) {
     const pointWithCov p_v = input_points[i];
+    // 计算点所在体素位置
     float loc_xyz[3];
     for (int j = 0; j < 3; j++) {
       loc_xyz[j] = p_v.point[j] / voxel_size;
+      // 如果坐标值小于0，则减去1，确保体素位置正确
       if (loc_xyz[j] < 0) {
         loc_xyz[j] -= 1.0;
       }
     }
+    // 创建体素位置对象
     VOXEL_LOC position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1],
                        (int64_t)loc_xyz[2]);
+    // 查找map中体素对应的octotree
     auto iter = feat_map.find(position);
+    // 如果找到了，把点插入，自增点数
     if (iter != feat_map.end()) {
       feat_map[position]->temp_points_.push_back(p_v);
       feat_map[position]->new_points_num_++;
     } else {
+      // 如果不存在，创建cototree对象，并设置属性
       OctoTree *octo_tree =
           new OctoTree(max_layer, 0, layer_point_size, max_points_size,
                        max_cov_points_size, planer_threshold);
@@ -561,6 +606,7 @@ void buildVoxelMap(const std::vector<pointWithCov> &input_points,
       feat_map[position]->layer_point_size_ = layer_point_size;
     }
   }
+  // 构建完成后，对每个体素的octotree进行初始化
   for (auto iter = feat_map.begin(); iter != feat_map.end(); ++iter) {
     iter->second->init_octo_tree();
   }
@@ -617,37 +663,51 @@ void transformLidar(const StatesGroup &state,
     pi.z = p(2);
     pi.intensity = p_c.intensity;
     trans_cloud->points.push_back(pi);
-  }
 }
+  }
 
+/*
+  构建单点的残差，存放single_ptpl
+  用于计算点到平面的距离并根据一定条件更新相关概率和平面参数
+*/
 void build_single_residual(const pointWithCov &pv, const OctoTree *current_octo,
                            const int current_layer, const int max_layer,
                            const double sigma_num, bool &is_sucess,
                            double &prob, ptpl &single_ptpl) {
   double radius_k = 3;
   Eigen::Vector3d p_w = pv.point_world;
+  // 如果该八叉树第一层就是plane，直接处理，否则找下一层
   if (current_octo->plane_ptr_->is_plane) {
     Plane &plane = *current_octo->plane_ptr_;
     Eigen::Vector3d p_world_to_center = p_w - plane.center;
+    // 向量在x和y方向上的投影
     double proj_x = p_world_to_center.dot(plane.x_normal);
     double proj_y = p_world_to_center.dot(plane.y_normal);
+    // 点面距离
     float dis_to_plane =
         fabs(plane.normal(0) * p_w(0) + plane.normal(1) * p_w(1) +
              plane.normal(2) * p_w(2) + plane.d);
+    // 点到面中心距离
     float dis_to_center =
         (plane.center(0) - p_w(0)) * (plane.center(0) - p_w(0)) +
         (plane.center(1) - p_w(1)) * (plane.center(1) - p_w(1)) +
         (plane.center(2) - p_w(2)) * (plane.center(2) - p_w(2));
+
+    // 点到平面中心向量的 投影距离，
     float range_dis = sqrt(dis_to_center - dis_to_plane * dis_to_plane);
 
+    // 用于判断该点是否在面内
     if (range_dis <= radius_k * plane.radius) {
+      // 下面对应论文公式13
       Eigen::Matrix<double, 1, 6> J_nq;
       J_nq.block<1, 3>(0, 0) = p_w - plane.center;
       J_nq.block<1, 3>(0, 3) = -plane.normal;
       double sigma_l = J_nq * plane.plane_cov * J_nq.transpose();
       sigma_l += plane.normal.transpose() * pv.cov * plane.normal;
+      // 点面距离足够小才使用
       if (dis_to_plane < sigma_num * sqrt(sigma_l)) {
         is_sucess = true;
+        // 高斯概率公式，计算点属于平面的概率
         double this_prob = 1.0 / (sqrt(sigma_l)) *
                            exp(-0.5 * dis_to_plane * dis_to_plane / sigma_l);
         if (this_prob > prob) {
@@ -669,6 +729,7 @@ void build_single_residual(const pointWithCov &pv, const OctoTree *current_octo,
       return;
     }
   } else {
+    // 如果不是平面，则找子节点的面来构建残差
     if (current_layer < max_layer) {
       for (size_t leafnum = 0; leafnum < 8; leafnum++) {
         if (current_octo->leaves_[leafnum] != nullptr) {
@@ -793,6 +854,13 @@ void GetUpdatePlane(const OctoTree *current_octo, const int pub_max_voxel_layer,
 //   }
 // }
 
+/*
+  匹配的残差构建
+  voxel_map: 地图
+  pv_list：当前帧点+cov
+  ptpl_list: 存储结果
+  sigma_num: 3
+ */
 void BuildResidualListOMP(const unordered_map<VOXEL_LOC, OctoTree *> &voxel_map,
                           const double voxel_size, const double sigma_num,
                           const int max_layer,
@@ -801,9 +869,12 @@ void BuildResidualListOMP(const unordered_map<VOXEL_LOC, OctoTree *> &voxel_map,
                           std::vector<Eigen::Vector3d> &non_match) {
   std::mutex mylock;
   ptpl_list.clear();
+  // 临时存储每个点的残差信息
   std::vector<ptpl> all_ptpl_list(pv_list.size());
+  // 用于标记每个点是否成功构建残差
   std::vector<bool> useful_ptpl(pv_list.size());
   std::vector<size_t> index(pv_list.size());
+  // 初始化索引和useful状态
   for (size_t i = 0; i < index.size(); ++i) {
     index[i] = i;
     useful_ptpl[i] = false;
@@ -815,6 +886,7 @@ void BuildResidualListOMP(const unordered_map<VOXEL_LOC, OctoTree *> &voxel_map,
   for (int i = 0; i < index.size(); i++) {
     pointWithCov pv = pv_list[i];
     float loc_xyz[3];
+    // 计算体素
     for (int j = 0; j < 3; j++) {
       loc_xyz[j] = pv.point_world[j] / voxel_size;
       if (loc_xyz[j] < 0) {
@@ -824,15 +896,19 @@ void BuildResidualListOMP(const unordered_map<VOXEL_LOC, OctoTree *> &voxel_map,
     VOXEL_LOC position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1],
                        (int64_t)loc_xyz[2]);
     auto iter = voxel_map.find(position);
+    // 找到对应的octotree
     if (iter != voxel_map.end()) {
       OctoTree *current_octo = iter->second;
       ptpl single_ptpl;
       bool is_sucess = false;
       double prob = 0;
+      // 构建单个点的残差
       build_single_residual(pv, current_octo, 0, max_layer, sigma_num,
                             is_sucess, prob, single_ptpl);
+      // 如果构建失败，在周围找
       if (!is_sucess) {
         VOXEL_LOC near_position = position;
+        // 根据位置判断是否需要调整 near_position 的坐标
         if (loc_xyz[0] >
             (current_octo->voxel_center_[0] + current_octo->quater_length_)) {
           near_position.x = near_position.x + 1;
@@ -854,6 +930,7 @@ void BuildResidualListOMP(const unordered_map<VOXEL_LOC, OctoTree *> &voxel_map,
                                  current_octo->quater_length_)) {
           near_position.z = near_position.z - 1;
         }
+        // 尝试在邻近的体素位置查找八叉树节点
         auto iter_near = voxel_map.find(near_position);
         if (iter_near != voxel_map.end()) {
           build_single_residual(pv, iter_near->second, 0, max_layer, sigma_num,
@@ -1219,6 +1296,7 @@ void pubPlaneMap(const std::unordered_map<VOXEL_LOC, OctoTree *> &feat_map,
   //      << "total size: " << feat_map.size() << endl;
 }
 
+// 按公式计算点的协方差，公式1
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc,
                  const float degree_inc, Eigen::Matrix3d &cov) {
   float range = sqrt(pb[0] * pb[0] + pb[1] * pb[1] + pb[2] * pb[2]);
